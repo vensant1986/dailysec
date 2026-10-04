@@ -1,0 +1,11 @@
+{
+  "name": "daily-sector",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "vercel dev"
+  },
+  "dependencies": {
+    "openai": "^4.0.0"
+  }
+}
