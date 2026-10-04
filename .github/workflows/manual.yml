@@ -10,17 +10,46 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Запустить Дневной сектор
+      - name: Запустить Дневной сектор и отправить в Telegram
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
         run: |
-          curl --fail --silent --show-error https://api.openai.com/v1/responses \
+          curl --fail --silent --show-error \
+            https://api.openai.com/v1/responses \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $OPENAI_API_KEY" \
             -d '{
               "model": "gpt-6-luna",
-              "tools": [{"type": "web_search"}],
-              "input": "Ты редактор проекта «Дневной сектор». Изучи актуальное информационное поле с помощью веб-поиска. Найди наиболее значимые новые события. Не выдумывай факты. Подготовь краткий выпуск на русском языке. Структура: главное; что изменилось; почему важно; что отслеживать дальше."
-            }' | tee response.json
+              "tools": [
+                {
+                  "type": "web_search"
+                }
+              ],
+              "input": "Ты редактор проекта «Дневной сектор». Изучи актуальное информационное поле с помощью веб-поиска. Найди наиболее значимые новые события. Не выдумывай факты. Не повторяй устаревшие события как новые. Подготовь краткий выпуск на русском языке. Структура: ГЛАВНОЕ; ЧТО ИЗМЕНИЛОСЬ; ПОЧЕМУ ВАЖНО; ЧТО ОТСЛЕЖИВАТЬ ДАЛЬШЕ."
+            }' > response.json
 
-          cat response.json
+          MESSAGE=$(jq -r '
+            [
+              .output[]
+              | select(.type == "message")
+              | .content[]
+              | select(.type == "output_text")
+              | .text
+            ]
+            | join("\n")
+          ' response.json)
+
+          if [ -z "$MESSAGE" ] || [ "$MESSAGE" = "null" ]; then
+            echo "Не удалось получить текст выпуска"
+            cat response.json
+            exit 1
+          fi
+
+          curl --fail --silent --show-error \
+            -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${MESSAGE}"
