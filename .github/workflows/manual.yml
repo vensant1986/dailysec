@@ -18,6 +18,10 @@ jobs:
           restore-keys: |
             day-sector-memory-
 
+      - name: Подготовить файл памяти
+        run: |
+          touch sector-memory.txt
+
       - name: Запустить Дневной сектор
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -25,10 +29,9 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
         run: |
-          # Берём компактную память предыдущих выпусков.
-          # Не позволяем ей бесконечно разрастаться.
-          if [ -f sector-memory.txt ]; then
-            PREVIOUS=$(tail -c 16000 sector-memory.txt)
+          # Берём только компактную память предыдущих выпусков.
+          if [ -s sector-memory.txt ]; then
+            PREVIOUS=$(tail -c 12000 sector-memory.txt)
           else
             PREVIOUS="Предыдущих выпусков в памяти нет."
           fi
@@ -37,6 +40,7 @@ jobs:
           Ты редактор проекта «Дневной сектор 3.0».
 
           Работай по редакционной системе «Утреннего сектора 3.0».
+
           Сохраняй редакционную политику, тематические приоритеты,
           иерархию источников, поиск первоисточников, фактчекинг,
           перекрёстную проверку, разграничение факта, заявления,
@@ -52,26 +56,27 @@ jobs:
           изменившиеся после предыдущего запуска.
 
           Не делай обзор всего дня заново.
-
           Уже выданную новость повторно не выдавай.
-
           Перепечатка старой информации не является новой новостью.
 
           Старый сюжет допускается только при наличии существенного
           подтверждённого развития.
 
           Для развивающегося сюжета установи:
+
           БЫЛО — что было известно раньше.
           СТАЛО — какой существенный новый факт появился сейчас.
 
           Центр нового материала — СТАЛО.
 
-          Telegram и социальные сети используй как радар, а не как
-          доказательство. По возможности устанавливай первоисточник.
+          Telegram и социальные сети используй как радар,
+          а не как доказательство.
+          По возможности устанавливай первоисточник.
 
           Не выдавай заявление за установленный факт.
 
           Каждый материал проходит:
+
           сигнал → проверка свежести → антидубль → первоисточник →
           фактчекинг → сверка → позиции сторон → оценка значимости →
           третий голос → заголовки → контекст → SEO → LEGAL CHECK.
@@ -89,13 +94,17 @@ jobs:
           Если достоин публикации только один сюжет — выдай один.
 
           Если достойных новых сюжетов нет — ответь только:
+
           «Дневной сектор: новых подтверждённых материалов нет.»
 
           Не пересказывай старые новости ради заполнения выпуска.
           Не повторяй один и тот же контекст без необходимости.
-          Пиши компактно, но не жертвуй фактчекингом и правовым контролем.
+
+          Пиши компактно, но не жертвуй фактчекингом
+          и правовым контролем.
 
           Для каждого публикуемого сюжета дай:
+
           1. H1.
           2. Короткий лид.
           3. Что произошло / что изменилось.
@@ -105,19 +114,25 @@ jobs:
           7. SEO-заголовок.
           8. Редакционный заголовок.
 
-          Не раскрывай внутренние рассуждения, служебные проверки
-          и скрытые цепочки рассуждений. Выдавай готовый редакционный результат.
+          Не раскрывай внутренние рассуждения,
+          служебные проверки и скрытые цепочки рассуждений.
+
+          Выдавай готовый редакционный результат.
           EOF
           )
 
           FULL_PROMPT="${PROMPT}
 
-          АНТИДУБЛЬ. Ниже находится компактная память предыдущих выпусков.
+          АНТИДУБЛЬ.
+
+          Ниже находится компактная память предыдущих выпусков.
           Не повторяй уже опубликованные сюжеты, если после публикации
           не появилось существенного подтверждённого нового факта.
 
           --- ПАМЯТЬ ПРЕДЫДУЩИХ ВЫПУСКОВ ---
+
           ${PREVIOUS}
+
           --- КОНЕЦ ПАМЯТИ ---"
 
           PAYLOAD=$(jq -n \
@@ -134,54 +149,33 @@ jobs:
               input: $input
             }')
 
-          SUCCESS=0
+          echo "Отправляем один запрос OpenAI."
 
-          for ATTEMPT in 1 2 3; do
-            echo "Попытка OpenAI: ${ATTEMPT}"
+          HTTP_CODE=$(curl --silent --show-error \
+            -D headers.txt \
+            -o response.json \
+            -w "%{http_code}" \
+            https://api.openai.com/v1/responses \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $OPENAI_API_KEY" \
+            -d "$PAYLOAD")
 
-            HTTP_CODE=$(curl --silent --show-error \
-              -D headers.txt \
-              -o response.json \
-              -w "%{http_code}" \
-              https://api.openai.com/v1/responses \
-              -H "Content-Type: application/json" \
-              -H "Authorization: Bearer $OPENAI_API_KEY" \
-              -d "$PAYLOAD")
+          echo "OpenAI HTTP status: ${HTTP_CODE}"
 
-            echo "OpenAI HTTP status: ${HTTP_CODE}"
-
-            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
-              SUCCESS=1
-              break
-            fi
-
-            echo "Ответ OpenAI:"
+          # При 429 НЕ повторяем запрос в этом же запуске.
+          if [ "$HTTP_CODE" = "429" ]; then
+            echo "Получен временный rate limit OpenAI (429)."
+            echo "Повторных запросов сейчас не делаем, чтобы не расходовать TPM."
+            echo "Следующий плановый запуск попробует снова."
             cat response.json
-
-            if [ "$HTTP_CODE" = "429" ]; then
-              RETRY_AFTER=$(grep -i '^retry-after:' headers.txt \
-                | tail -1 \
-                | awk '{print $2}' \
-                | tr -d '\r')
-
-              if [[ "$RETRY_AFTER" =~ ^[0-9]+$ ]] && [ "$RETRY_AFTER" -le 300 ]; then
-                echo "Лимит временно исчерпан. Ждём ${RETRY_AFTER} секунд."
-                sleep "$RETRY_AFTER"
-              elif [ "$ATTEMPT" -lt 3 ]; then
-                WAIT=$((ATTEMPT * 60))
-                echo "429 без короткого Retry-After. Ждём ${WAIT} секунд."
-                sleep "$WAIT"
-              fi
-            else
-              echo "Ошибка не является временным rate limit."
-              exit 1
-            fi
-          done
-
-          if [ "$SUCCESS" -ne 1 ]; then
-            echo "Лимит OpenAI пока не освободился."
-            echo "Этот часовой запуск пропускаем. Следующий запуск попробует снова."
             exit 0
+          fi
+
+          # Любая другая ошибка API — настоящая ошибка workflow.
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "Ошибка OpenAI API:"
+            cat response.json
+            exit 1
           fi
 
           MESSAGE=$(jq -r '
@@ -203,8 +197,8 @@ jobs:
 
           echo "Ответ OpenAI успешно получен."
 
-          # Telegram ограничивает размер одного сообщения.
-          # Делим длинный выпуск на безопасные части.
+          # Делим сообщение на части для Telegram.
+          rm -f telegram-part-*.txt
           printf '%s' "$MESSAGE" > telegram-message.txt
 
           split -b 3500 \
@@ -223,21 +217,24 @@ jobs:
             sleep 1
           done
 
-          # Добавляем новый выпуск в память антидублей.
+          echo "Выпуск отправлен в Telegram."
+
+          # Сохраняем выпуск в памяти антидублей.
           {
-            if [ -f sector-memory.txt ]; then
-              tail -c 12000 sector-memory.txt
+            if [ -s sector-memory.txt ]; then
+              tail -c 10000 sector-memory.txt
             fi
 
             echo ""
             echo "===== ВЫПУСК ====="
             printf '%s\n' "$MESSAGE"
+
           } > sector-memory-new.txt
 
           mv sector-memory-new.txt sector-memory.txt
 
-          # Ограничиваем размер памяти.
-          tail -c 16000 sector-memory.txt > sector-memory-trimmed.txt
+          # Не позволяем памяти бесконечно расти.
+          tail -c 12000 sector-memory.txt > sector-memory-trimmed.txt
           mv sector-memory-trimmed.txt sector-memory.txt
 
           echo "Дневной сектор успешно завершён."
